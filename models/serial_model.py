@@ -1,6 +1,7 @@
 """
 混合抓取网络 (Hybrid Grasp Network)
 结合 CNN Backbone + Swin Transformer + GGCNN-style Decoder
+集成抓取感知注意力模块 (Grasp-Aware Attention Module, GAAM)
 """
 from typing import Dict, Optional
 import torch
@@ -15,6 +16,10 @@ from swin import (
     PatchEmbed, BasicLayer, PatchMerging,
     to_2tuple, trunc_normal_
 )
+
+# 导入抓取感知注意力模块
+from .grasp_aware_attention import GraspAwareAttentionModule
+from .coarse_to_fine_gaam import CoarseToFineGAAM
 
 
 class UncertaintyWeightedLoss(nn.Module):
@@ -321,18 +326,26 @@ class SwinTransformerBlock(nn.Module):
 
 class GGCNNDecoder(nn.Module):
     """
-    GGCNN 风格的解码器
-    三级上采样 + Skip Connections (F3, F2, F1)
+    GGCNN 风格的解码器（集成 GAAM 模块）
+    三级上采样 + Skip Connections (F3, F2, F1) + 抓取感知注意力
     输出: Pos (质量/位置), Cos (角度余弦), Sin (角度正弦), Width (宽度)
+    
+    创新点：在关键位置插入 GAAM 模块，提升抓取预测质量
     """
-    def __init__(self, swin_channels: int = 768):
+    def __init__(self, swin_channels: int = 768, use_gaam: bool = True, 
+                 use_cf_gaam: bool = False, num_peaks: int = 5):
         """
         初始化解码器
         
         Args:
             swin_channels: Swin 输出通道数 (tiny/small=768, base=1024)
+            use_gaam: 是否使用抓取感知注意力模块（GAAM）
+            use_cf_gaam: 是否使用粗到精GAAM模块（CF-GAAM）- 增强版
+            num_peaks: CF-GAAM中检测的峰值数量
         """
         super(GGCNNDecoder, self).__init__()
+        self.use_gaam = use_gaam and not use_cf_gaam  # 如果使用CF-GAAM，则不使用原始GAAM
+        self.use_cf_gaam = use_cf_gaam
         
         # 降维层：Swin 输出 → 较小通道数
         self.reduce_channels = nn.Sequential(
@@ -340,6 +353,27 @@ class GGCNNDecoder(nn.Module):
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=True)
         )
+        
+        # GAAM/CF-GAAM 模块1：在解码器开始处（降维后）
+        if use_cf_gaam:
+            self.cf_gaam1 = CoarseToFineGAAM(
+                channels=256,
+                use_coarse_fine=True,
+                num_peaks=num_peaks,
+                use_gaam=True,  # CF-GAAM内部也使用原始GAAM
+                use_edge=True,
+                use_center=True,
+                use_width=True,
+                use_angle=True
+            )
+        elif use_gaam:
+            self.gaam1 = GraspAwareAttentionModule(
+                channels=256,
+                use_edge=True,
+                use_center=True,
+                use_width=True,
+                use_angle=True
+            )
         
         # 上采样 layer 1: 7x7 → 14x14
         self.upsample1 = nn.Sequential(
@@ -365,6 +399,27 @@ class GGCNNDecoder(nn.Module):
             nn.ReLU(inplace=True)
         )
         
+        # GAAM/CF-GAAM 模块2：在 F3 skip connection 之后（28x28 尺度）
+        if use_cf_gaam:
+            self.cf_gaam2 = CoarseToFineGAAM(
+                channels=192,
+                use_coarse_fine=True,
+                num_peaks=num_peaks,
+                use_gaam=True,
+                use_edge=True,
+                use_center=True,
+                use_width=True,
+                use_angle=True
+            )
+        elif use_gaam:
+            self.gaam2 = GraspAwareAttentionModule(
+                channels=192,
+                use_edge=True,
+                use_center=True,
+                use_width=True,
+                use_angle=True
+            )
+        
         # 上采样 layer 3: 28x28 → 56x56
         self.upsample3 = nn.Sequential(
             nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
@@ -380,6 +435,27 @@ class GGCNNDecoder(nn.Module):
             nn.BatchNorm2d(96),
             nn.ReLU(inplace=True)
         )
+        
+        # GAAM/CF-GAAM 模块3：在 F2 skip connection 之后（56x56 尺度）
+        if use_cf_gaam:
+            self.cf_gaam3 = CoarseToFineGAAM(
+                channels=96,
+                use_coarse_fine=True,
+                num_peaks=num_peaks,
+                use_gaam=True,
+                use_edge=True,
+                use_center=True,
+                use_width=True,
+                use_angle=True
+            )
+        elif use_gaam:
+            self.gaam3 = GraspAwareAttentionModule(
+                channels=96,
+                use_edge=True,
+                use_center=True,
+                use_width=True,
+                use_angle=True
+            )
         
         # 上采样 layer 4: 56x56 → 112x112
         self.upsample4 = nn.Sequential(
@@ -411,6 +487,27 @@ class GGCNNDecoder(nn.Module):
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True)
         )
+        
+        # GAAM/CF-GAAM 模块4：在最终输出之前（224x224 尺度，用于最终精化）
+        if use_cf_gaam:
+            self.cf_gaam4 = CoarseToFineGAAM(
+                channels=32,
+                use_coarse_fine=True,
+                num_peaks=num_peaks,
+                use_gaam=True,
+                use_edge=True,
+                use_center=True,
+                use_width=True,
+                use_angle=True
+            )
+        elif use_gaam:
+            self.gaam4 = GraspAwareAttentionModule(
+                channels=32,
+                use_edge=True,
+                use_center=True,
+                use_width=True,
+                use_angle=True
+            )
         
         # 独立输出头（每个头都有独立的卷积层，参考 swin.py 和 parallel_model.py）
         # Pos head: 位置/质量评估 [0, 1]
@@ -461,6 +558,12 @@ class GGCNNDecoder(nn.Module):
         # 降维: 768 → 256
         x = self.reduce_channels(x)  # [B, 256, 7, 7]
         
+        # GAAM/CF-GAAM 模块1：在解码器开始处
+        if self.use_cf_gaam:
+            x = self.cf_gaam1(x)  # [B, 256, 7, 7]
+        elif self.use_gaam:
+            x = self.gaam1(x)  # [B, 256, 7, 7]
+        
         # 上采样: 7x7 → 14x14
         x = self.upsample1(x)  # [B, 192, 14, 14]
         
@@ -473,6 +576,12 @@ class GGCNNDecoder(nn.Module):
         x = torch.cat([x, f3], dim=1)  # [B, 384, 28, 28]
         x = self.conv_skip3(x)  # [B, 192, 28, 28]
         
+        # GAAM/CF-GAAM 模块2：在 F3 skip connection 之后
+        if self.use_cf_gaam:
+            x = self.cf_gaam2(x)  # [B, 192, 28, 28]
+        elif self.use_gaam:
+            x = self.gaam2(x)  # [B, 192, 28, 28]
+        
         # 上采样: 28x28 → 56x56
         x = self.upsample3(x)  # [B, 96, 56, 56]
         
@@ -481,6 +590,12 @@ class GGCNNDecoder(nn.Module):
             f2 = F.interpolate(f2, size=x.shape[2:], mode='bilinear', align_corners=True)
         x = torch.cat([x, f2], dim=1)  # [B, 192, 56, 56]
         x = self.conv_skip2(x)  # [B, 96, 56, 56]
+        
+        # GAAM/CF-GAAM 模块3：在 F2 skip connection 之后
+        if self.use_cf_gaam:
+            x = self.cf_gaam3(x)  # [B, 96, 56, 56]
+        elif self.use_gaam:
+            x = self.gaam3(x)  # [B, 96, 56, 56]
         
         # 上采样: 56x56 → 112x112
         x = self.upsample4(x)  # [B, 48, 112, 112]
@@ -494,6 +609,12 @@ class GGCNNDecoder(nn.Module):
         # 最后的特征处理
         x = self.upsample_final1(x)  # [B, 32, 112, 112]
         x = self.upsample_final2(x)  # [B, 32, 224, 224]
+        
+        # GAAM/CF-GAAM 模块4：在最终输出之前（最终精化）
+        if self.use_cf_gaam:
+            x = self.cf_gaam4(x)  # [B, 32, 224, 224]
+        elif self.use_gaam:
+            x = self.gaam4(x)  # [B, 32, 224, 224]
         
         # 独立输出头（每个头独立处理共享特征）
         pos_output = self.pos_output(x)    # [B, 1, 224, 224] (质量/位置)
@@ -530,7 +651,8 @@ class HybridGraspNet(nn.Module):
     
     def __init__(self, in_chans: int = 4, input_channels: int = None, 
                  use_pretrained: bool = True, swin_size: str = 'tiny',
-                 use_uncertainty_loss: bool = True):
+                 use_uncertainty_loss: bool = True, use_gaam: bool = True,
+                 use_cf_gaam: bool = False, num_peaks: int = 5):
         """
         Args:
             in_chans: 输入通道数，默认4 (RGB-D)
@@ -538,6 +660,9 @@ class HybridGraspNet(nn.Module):
             use_pretrained: 是否使用 ImageNet 预训练的 Swin
             swin_size: Swin 模型大小 ('tiny', 'small', 'base')
             use_uncertainty_loss: 是否使用不确定性加权损失（推荐开启）
+            use_gaam: 是否使用抓取感知注意力模块（GAAM）- 核心创新模块
+            use_cf_gaam: 是否使用粗到精GAAM模块（CF-GAAM）- 增强版，包含粗到精预测框架
+            num_peaks: CF-GAAM中检测的峰值数量
         """
         super(HybridGraspNet, self).__init__()
         
@@ -550,6 +675,11 @@ class HybridGraspNet(nn.Module):
         print(f"  - Swin 模型: {swin_size}")
         print(f"  - 使用预训练: {use_pretrained}")
         print(f"  - 不确定性损失: {'开启' if use_uncertainty_loss else '关闭'}")
+        if use_cf_gaam:
+            print(f"  - 粗到精抓取感知注意力 (CF-GAAM): 开启 ⭐⭐ 增强版创新模块")
+            print(f"    - 峰值数量: {num_peaks}")
+        else:
+            print(f"  - 抓取感知注意力 (GAAM): {'开启' if use_gaam else '关闭'} ⭐ 核心创新模块")
         
         # CNN Backbone：提取多尺度特征
         self.backbone = CNNBackbone(in_chans=in_chans)
@@ -567,8 +697,13 @@ class HybridGraspNet(nn.Module):
         # Swin 输出通道数
         swin_out_ch = self.swin.out_channels
         
-        # Decoder
-        self.decoder = GGCNNDecoder(swin_channels=swin_out_ch)
+        # Decoder（集成 GAAM 或 CF-GAAM）
+        self.decoder = GGCNNDecoder(
+            swin_channels=swin_out_ch, 
+            use_gaam=use_gaam,
+            use_cf_gaam=use_cf_gaam,
+            num_peaks=num_peaks
+        )
         
         # 不确定性加权损失模块
         self.use_uncertainty_loss = use_uncertainty_loss

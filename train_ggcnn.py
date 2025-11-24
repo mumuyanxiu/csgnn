@@ -54,6 +54,14 @@ def parse_args():
     parser.add_argument('--swin-size', type=str, default='tiny',
                         choices=['tiny', 'small', 'base'],
                         help='Swin Transformer model size')
+    
+    # GAAM parameters
+    parser.add_argument('--use-gaam', action='store_true',
+                        help='Use Grasp-Aware Attention Module (GAAM)')
+    parser.add_argument('--use-cf-gaam', action='store_true',
+                        help='Use Coarse-to-Fine GAAM (CF-GAAM) - Enhanced version with coarse-to-fine prediction')
+    parser.add_argument('--num-peaks', type=int, default=5,
+                        help='Number of peaks to detect in CF-GAAM')
 
     # Logging etc.
     parser.add_argument('--description', type=str, default='', help='Training description')
@@ -237,27 +245,41 @@ def run():
 
     # 根据网络类型传递参数
     if args.network == 'parallel':
-        # Parallel 模型支持 fusion_type, num_heads, swin_size
+s        # Parallel 模型支持 fusion_type, num_heads, swin_size, GAAM/CF-GAAM
         net = ggcnn(
             input_channels=input_channels,
             fusion_type=args.fusion_type,
             num_heads=args.num_heads,
             swin_size=args.swin_size,
-            use_pretrained=True
+            use_pretrained=True,
+            use_gaam=args.use_gaam,
+            use_cf_gaam=args.use_cf_gaam,
+            num_peaks=args.num_peaks
         )
         logging.info(f'Parallel Model Config:')
         logging.info(f'  - Fusion Type: {args.fusion_type}')
         logging.info(f'  - Num Heads: {args.num_heads}')
         logging.info(f'  - Swin Size: {args.swin_size}')
+        if args.use_cf_gaam:
+            logging.info(f'  - CF-GAAM: Enabled (num_peaks={args.num_peaks})')
+        elif args.use_gaam:
+            logging.info(f'  - GAAM: Enabled')
     elif args.network == 'hybrid':
-        # Serial 模型支持 swin_size
+        # Serial 模型支持 swin_size, GAAM/CF-GAAM
         net = ggcnn(
             input_channels=input_channels,
             swin_size=args.swin_size,
-            use_pretrained=True
+            use_pretrained=True,
+            use_gaam=args.use_gaam,
+            use_cf_gaam=args.use_cf_gaam,
+            num_peaks=args.num_peaks
         )
         logging.info(f'Hybrid Model Config:')
         logging.info(f'  - Swin Size: {args.swin_size}')
+        if args.use_cf_gaam:
+            logging.info(f'  - CF-GAAM: Enabled (num_peaks={args.num_peaks})')
+        elif args.use_gaam:
+            logging.info(f'  - GAAM: Enabled')
     else:
         # 其他模型（如 ggcnn）
         net = ggcnn(input_channels=input_channels)
@@ -293,9 +315,17 @@ def run():
         f.write(f'Fusion Type: {args.fusion_type}\n')
         f.write(f'Num Heads: {args.num_heads}\n')
         f.write(f'Swin Size: {args.swin_size}\n')
+        if args.use_cf_gaam:
+            f.write(f'CF-GAAM: Enabled (num_peaks={args.num_peaks})\n')
+        elif args.use_gaam:
+            f.write(f'GAAM: Enabled\n')
     elif args.network == 'hybrid':
         f.write(f'\n[Hybrid Model Config]\n')
         f.write(f'Swin Size: {args.swin_size}\n')
+        if args.use_cf_gaam:
+            f.write(f'CF-GAAM: Enabled (num_peaks={args.num_peaks})\n')
+        elif args.use_gaam:
+            f.write(f'GAAM: Enabled\n')
     
     # 保存训练配置
     f.write(f'\n[Training Config]\n')
