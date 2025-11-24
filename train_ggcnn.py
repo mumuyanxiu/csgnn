@@ -245,7 +245,7 @@ def run():
 
     # 根据网络类型传递参数
     if args.network == 'parallel':
-s        # Parallel 模型支持 fusion_type, num_heads, swin_size, GAAM/CF-GAAM
+        # Parallel 模型支持 fusion_type, num_heads, swin_size, GAAM/CF-GAAM
         net = ggcnn(
             input_channels=input_channels,
             fusion_type=args.fusion_type,
