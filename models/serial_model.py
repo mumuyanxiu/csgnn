@@ -1,7 +1,7 @@
 """
-混合抓取网络 (Hybrid Grasp Network)
-结合 CNN Backbone + Swin Transformer + GGCNN-style Decoder
-集成抓取感知注意力模块 (Grasp-Aware Attention Module, GAAM)
+Hybrid Grasp Network.
+Combines CNN backbone + Swin Transformer + GGCNN-style decoder,
+with the Grasp-Aware Attention Module (GAAM).
 """
 from typing import Dict, Optional
 import torch
@@ -10,24 +10,24 @@ import torch.nn.functional as F
 import sys
 import os
 
-# 导入 swin.py 中的经典 Swin Transformer 实现
+# Classic Swin Transformer from swin.py
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from swin import (
     PatchEmbed, BasicLayer, PatchMerging,
     to_2tuple, trunc_normal_
 )
 
-# 导入抓取感知注意力模块
+# Grasp-aware attention modules
 from .grasp_aware_attention import GraspAwareAttentionModule
 from .coarse_to_fine_gaam import CoarseToFineGAAM
 
 
 class UncertaintyWeightedLoss(nn.Module):
     """
-    不确定性加权多任务损失（与 parallel_model 共享）
-    
-    论文: Multi-Task Learning Using Uncertainty to Weigh Losses (CVPR 2018)
-    原理: L = Σ exp(-s_i) * L_i + s_i
+    Uncertainty-weighted multi-task loss (shared with parallel_model).
+
+    Paper: Multi-Task Learning Using Uncertainty to Weigh Losses (CVPR 2018)
+    Objective: L = sum_i exp(-s_i) * L_i + s_i
     """
     def __init__(self, num_tasks: int = 4):
         super(UncertaintyWeightedLoss, self).__init__()
@@ -49,14 +49,14 @@ class UncertaintyWeightedLoss(nn.Module):
 
 class ResidualBlock(nn.Module):
     """
-    基本残差块: Conv3x3 → BN → ReLU → Conv3x3 → BN + Skip
+    Basic residual block: Conv3x3 -> BN -> ReLU -> Conv3x3 -> BN + skip.
     """
     def __init__(self, in_channels: int, out_channels: int, stride: int = 1):
         """
         Args:
-            in_channels: 输入通道数
-            out_channels: 输出通道数
-            stride: 卷积步长
+            in_channels: Number of input channels
+            out_channels: Number of output channels
+            stride: Convolution stride
         """
         super(ResidualBlock, self).__init__()
         
@@ -81,10 +81,10 @@ class ResidualBlock(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: 输入特征 [B, C_in, H, W]
+            x: Input features [B, C_in, H, W]
         
         Returns:
-            输出特征 [B, C_out, H', W']
+            Output features [B, C_out, H', W']
         """
         identity = self.skip(x)
         
@@ -103,18 +103,18 @@ class ResidualBlock(nn.Module):
 
 class CNNBackbone(nn.Module):
     """
-    CNN Backbone: 提取多尺度特征
-    输入: [B, 4, H, W] (RGB-D)
-    输出: F1 [B, 48, H/2, W/2], F2 [B, 96, H/4, W/4], F3 [B, 192, H/8, W/8]
+    CNN backbone: multi-scale features.
+    Input: [B, 4, H, W] (RGB-D)
+    Output: F1 [B, 48, H/2, W/2], F2 [B, 96, H/4, W/4], F3 [B, 192, H/8, W/8]
     """
     def __init__(self, in_chans: int = 4):
         """
         Args:
-            in_chans: 输入通道数，默认4 (RGB-D)
+            in_chans: Input channels, default 4 (RGB-D)
         """
         super(CNNBackbone, self).__init__()
         
-        # Stage 1: H → H/2, 输出48通道
+        # Stage 1: H -> H/2, 48 channels
         self.stage1 = nn.Sequential(
             nn.Conv2d(in_chans, 48, kernel_size=7, stride=2, padding=3, bias=False),
             nn.BatchNorm2d(48),
@@ -122,13 +122,13 @@ class CNNBackbone(nn.Module):
             ResidualBlock(48, 48, stride=1)
         )
         
-        # Stage 2: H/2 → H/4, 输出96通道
+        # Stage 2: H/2 -> H/4, 96 channels
         self.stage2 = nn.Sequential(
             ResidualBlock(48, 96, stride=2),
             ResidualBlock(96, 96, stride=1)
         )
         
-        # Stage 3: H/4 → H/8, 输出192通道
+        # Stage 3: H/4 -> H/8, 192 channels
         self.stage3 = nn.Sequential(
             ResidualBlock(96, 192, stride=2),
             ResidualBlock(192, 192, stride=1)
@@ -137,10 +137,10 @@ class CNNBackbone(nn.Module):
     def forward(self, x: torch.Tensor) -> tuple:
         """
         Args:
-            x: 输入图像 [B, 4, H, W]
+            x: Input image [B, 4, H, W]
         
         Returns:
-            (F1, F2, F3): 三个尺度的特征图
+            (F1, F2, F3): Feature maps at three scales
         """
         f1 = self.stage1(x)     # [B, 48, H/2, W/2]
         f2 = self.stage2(f1)    # [B, 96, H/4, W/4]
@@ -151,13 +151,13 @@ class CNNBackbone(nn.Module):
 
 class ChannelAdapter(nn.Module):
     """
-    通道适配层：将 CNN 特征通道数适配到 Swin 输入要求
+    Channel adapter: map CNN feature channels to Swin input requirements.
     """
     def __init__(self, in_channels: int = 96, out_channels: int = 3):
         """
         Args:
-            in_channels: 输入通道数 (来自 CNN)
-            out_channels: 输出通道数 (Swin 需要 3 通道 RGB)
+            in_channels: Input channels (from CNN)
+            out_channels: Output channels (Swin expects 3-channel RGB)
         """
         super(ChannelAdapter, self).__init__()
         
@@ -166,36 +166,36 @@ class ChannelAdapter(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: 输入特征 [B, in_channels, H, W]
+            x: Input features [B, in_channels, H, W]
         
         Returns:
-            适配后特征 [B, out_channels, H, W]
+            Adapted features [B, out_channels, H, W]
         """
         return self.adapt(x)
 
 
 class SwinTransformerBlock(nn.Module):
     """
-    Swin Transformer 模块 - 使用经典实现，不使用预训练
-    输入: [B, 3, 56, 56] 
-    输出: [B, 768, 7, 7] (对于 Swin-Tiny，即第4层输出)
+    Swin Transformer block using the classic implementation (no pretrained weights).
+    Input: [B, 3, 56, 56]
+    Output: [B, 768, 7, 7] for Swin-Tiny (stage-4 output)
     """
     def __init__(self, img_size: int = 56, pretrained: bool = False, model_size: str = 'tiny'):
         """
         Args:
-            img_size: 输入图像尺寸 (56 for F2 feature)
-            pretrained: 不使用预训练（保留参数以兼容接口）
-            model_size: 模型大小 ('tiny', 'small', 'base')
+            img_size: Input spatial size (56 for F2 features)
+            pretrained: Unused; kept for API compatibility
+            model_size: Model variant ('tiny', 'small', 'base')
         """
         super(SwinTransformerBlock, self).__init__()
         
-        # 模型配置（基于 swin.py 中的经典配置）
+        # Config (classic swin.py layout)
         configs = {
             'tiny': {
                 'embed_dim': 96,
                 'depths': [2, 2, 6, 2],
                 'num_heads': [3, 6, 12, 24],
-                'stage4_channels': 768  # 第4层输出通道数
+                'stage4_channels': 768  # Stage-4 output channels
             },
             'small': {
                 'embed_dim': 96,
@@ -214,15 +214,15 @@ class SwinTransformerBlock(nn.Module):
         config = configs.get(model_size, configs['tiny'])
         self.out_channels = config['stage4_channels']
         
-        print(f"[Swin] 使用经典 Swin Transformer 实现 (model_size={model_size}, pretrained=False)")
+        print(f"[Swin] Classic Swin Transformer (model_size={model_size}, pretrained=False)")
         print(f"  - embed_dim: {config['embed_dim']}")
         print(f"  - depths: {config['depths']}")
         print(f"  - num_heads: {config['num_heads']}")
-        print(f"  - 输出通道: {self.out_channels}")
+        print(f"  - output channels: {self.out_channels}")
         
-        # 输入图像尺寸（需要上采样到 224x224）
+        # Input size (upsampled to 224x224 for Swin)
         self.input_img_size = img_size  # 56
-        self.swin_img_size = 224  # Swin 标准输入尺寸
+        self.swin_img_size = 224  # Standard Swin input size
         self.patch_size = 4
         self.in_chans = 3
         self.embed_dim = config['embed_dim']
@@ -234,7 +234,7 @@ class SwinTransformerBlock(nn.Module):
         self.attn_drop_rate = 0.0
         self.drop_path_rate = 0.1
         
-        # 上采样层：56 → 224
+        # Upsample 56 -> 224
         self.upsample_for_swin = nn.Upsample(size=self.swin_img_size, mode='bilinear', align_corners=True)
         
         # Patch Embedding
@@ -251,12 +251,12 @@ class SwinTransformerBlock(nn.Module):
         
         self.pos_drop = nn.Dropout(p=self.drop_rate)
         
-        # 构建编码器层（全部4层，取最后一层）
-        # 我们需要4层：H → H/2 → H/4 → H/8 → H/16
+        # Encoder: all 4 stages; output is last stage
+        # Four stages: H -> H/2 -> H/4 -> H/8 -> H/16
         dpr = [x.item() for x in torch.linspace(0, self.drop_path_rate, sum(self.depths))]
         
         self.layers = nn.ModuleList()
-        for i_layer in range(4):  # 构建全部4层
+        for i_layer in range(4):  # Build all 4 stages
             layer = BasicLayer(
                 dim=int(self.embed_dim * 2 ** i_layer),
                 input_resolution=(
@@ -273,19 +273,19 @@ class SwinTransformerBlock(nn.Module):
                 attn_drop=self.attn_drop_rate,
                 drop_path=dpr[sum(self.depths[:i_layer]):sum(self.depths[:i_layer + 1])],
                 norm_layer=nn.LayerNorm,
-                downsample=PatchMerging if (i_layer < 3) else None,  # 前3层需要下采样
+                downsample=PatchMerging if (i_layer < 3) else None,  # Downsample first 3 stages
                 use_checkpoint=False
             )
             self.layers.append(layer)
         
-        # 归一化层（最后一层）
-        self.norm = nn.LayerNorm(int(self.embed_dim * 2 ** 3))  # 第4层通道数
+        # Norm after final stage
+        self.norm = nn.LayerNorm(int(self.embed_dim * 2 ** 3))  # Stage-4 channel count
         
-        # 初始化权重
+        # Init weights
         self.apply(self._init_weights)
     
     def _init_weights(self, m):
-        """初始化权重（从 swin.py 复制）"""
+        """Initialize weights (from swin.py)."""
         if isinstance(m, nn.Linear):
             trunc_normal_(m.weight, std=.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
@@ -297,26 +297,26 @@ class SwinTransformerBlock(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: 输入特征 [B, 3, 56, 56]
+            x: Input features [B, 3, 56, 56]
         
         Returns:
-            输出特征 [B, 768, 7, 7] (for tiny)
+            Output features [B, 768, 7, 7] (for tiny)
         """
-        # 上采样到 Swin 所需尺寸: 56 → 224
+        # Upsample to Swin input: 56 -> 224
         x = self.upsample_for_swin(x)  # [B, 3, 224, 224]
         
         # Patch Embedding
         x = self.patch_embed(x)  # [B, 56*56, 96] (H/4 * W/4, embed_dim)
         x = self.pos_drop(x)
         
-        # 通过编码器层（全部4层）
+        # Encoder stages
         for layer in self.layers:
-            x = layer(x)  # 每层输出: [B, L, C]
+            x = layer(x)  # Per stage: [B, L, C]
         
-        # 归一化
+        # Norm
         x = self.norm(x)  # [B, 7*7, 768] (H/16 * W/16, 768)
         
-        # 转换为 [B, 768, 7, 7]
+        # Reshape to [B, 768, 7, 7]
         B, L, C = x.shape
         H = W = int(L ** 0.5)
         x = x.view(B, H, W, C).permute(0, 3, 1, 2)  # [B, 768, 7, 7]
@@ -326,41 +326,41 @@ class SwinTransformerBlock(nn.Module):
 
 class GGCNNDecoder(nn.Module):
     """
-    GGCNN 风格的解码器（集成 GAAM 模块）
-    三级上采样 + Skip Connections (F3, F2, F1) + 抓取感知注意力
-    输出: Pos (质量/位置), Cos (角度余弦), Sin (角度正弦), Width (宽度)
-    
-    创新点：在关键位置插入 GAAM 模块，提升抓取预测质量
+    GGCNN-style decoder with GAAM.
+    Three upsampling stages + skip connections (F3, F2, F1) + grasp-aware attention.
+    Outputs: Pos (quality/location), Cos (angle cosine), Sin (angle sine), Width.
+
+    GAAM is inserted at key depths to improve grasp prediction quality.
     """
     def __init__(self, swin_channels: int = 768, use_gaam: bool = True, 
                  use_cf_gaam: bool = False, num_peaks: int = 5):
         """
-        初始化解码器
-        
+        Initialize decoder.
+
         Args:
-            swin_channels: Swin 输出通道数 (tiny/small=768, base=1024)
-            use_gaam: 是否使用抓取感知注意力模块（GAAM）
-            use_cf_gaam: 是否使用粗到精GAAM模块（CF-GAAM）- 增强版
-            num_peaks: CF-GAAM中检测的峰值数量
+            swin_channels: Swin output channels (tiny/small=768, base=1024)
+            use_gaam: Use grasp-aware attention (GAAM)
+            use_cf_gaam: Use coarse-to-fine GAAM (CF-GAAM), stronger variant
+            num_peaks: Number of peaks for CF-GAAM
         """
         super(GGCNNDecoder, self).__init__()
-        self.use_gaam = use_gaam and not use_cf_gaam  # 如果使用CF-GAAM，则不使用原始GAAM
+        self.use_gaam = use_gaam and not use_cf_gaam  # CF-GAAM replaces standalone GAAM
         self.use_cf_gaam = use_cf_gaam
         
-        # 降维层：Swin 输出 → 较小通道数
+        # Reduce Swin channels
         self.reduce_channels = nn.Sequential(
             nn.Conv2d(swin_channels, 256, kernel_size=1),
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=True)
         )
         
-        # GAAM/CF-GAAM 模块1：在解码器开始处（降维后）
+        # GAAM/CF-GAAM #1: after channel reduction
         if use_cf_gaam:
             self.cf_gaam1 = CoarseToFineGAAM(
                 channels=256,
                 use_coarse_fine=True,
                 num_peaks=num_peaks,
-                use_gaam=True,  # CF-GAAM内部也使用原始GAAM
+                use_gaam=True,  # CF-GAAM uses base GAAM inside
                 use_edge=True,
                 use_center=True,
                 use_width=True,
@@ -375,7 +375,7 @@ class GGCNNDecoder(nn.Module):
                 use_angle=True
             )
         
-        # 上采样 layer 1: 7x7 → 14x14
+        # Upsample layer 1: 7x7 -> 14x14
         self.upsample1 = nn.Sequential(
             nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
             nn.Conv2d(256, 192, kernel_size=3, padding=1),
@@ -383,7 +383,7 @@ class GGCNNDecoder(nn.Module):
             nn.ReLU(inplace=True)
         )
         
-        # 上采样 layer 2: 14x14 → 28x28
+        # Upsample layer 2: 14x14 -> 28x28
         self.upsample2 = nn.Sequential(
             nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
             nn.Conv2d(192, 192, kernel_size=3, padding=1),
@@ -391,15 +391,15 @@ class GGCNNDecoder(nn.Module):
             nn.ReLU(inplace=True)
         )
         
-        # 拼接 F3 后的卷积
-        # F3: [B, 192, 28, 28]，当前: [B, 192, 28, 28]，尺寸匹配
+        # Conv after concatenating F3
+        # F3: [B, 192, 28, 28], current: [B, 192, 28, 28], shapes align
         self.conv_skip3 = nn.Sequential(
             nn.Conv2d(192 + 192, 192, kernel_size=3, padding=1),
             nn.BatchNorm2d(192),
             nn.ReLU(inplace=True)
         )
         
-        # GAAM/CF-GAAM 模块2：在 F3 skip connection 之后（28x28 尺度）
+        # GAAM/CF-GAAM #2: after F3 skip (28x28)
         if use_cf_gaam:
             self.cf_gaam2 = CoarseToFineGAAM(
                 channels=192,
@@ -420,7 +420,7 @@ class GGCNNDecoder(nn.Module):
                 use_angle=True
             )
         
-        # 上采样 layer 3: 28x28 → 56x56
+        # Upsample layer 3: 28x28 -> 56x56
         self.upsample3 = nn.Sequential(
             nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
             nn.Conv2d(192, 96, kernel_size=3, padding=1),
@@ -428,15 +428,15 @@ class GGCNNDecoder(nn.Module):
             nn.ReLU(inplace=True)
         )
         
-        # 拼接 F2 后的卷积
-        # F2: [B, 96, 56, 56]，当前: [B, 96, 56, 56]，尺寸匹配
+        # Conv after concatenating F2
+        # F2: [B, 96, 56, 56], current: [B, 96, 56, 56], shapes align
         self.conv_skip2 = nn.Sequential(
             nn.Conv2d(96 + 96, 96, kernel_size=3, padding=1),
             nn.BatchNorm2d(96),
             nn.ReLU(inplace=True)
         )
         
-        # GAAM/CF-GAAM 模块3：在 F2 skip connection 之后（56x56 尺度）
+        # GAAM/CF-GAAM #3: after F2 skip (56x56)
         if use_cf_gaam:
             self.cf_gaam3 = CoarseToFineGAAM(
                 channels=96,
@@ -457,7 +457,7 @@ class GGCNNDecoder(nn.Module):
                 use_angle=True
             )
         
-        # 上采样 layer 4: 56x56 → 112x112
+        # Upsample layer 4: 56x56 -> 112x112
         self.upsample4 = nn.Sequential(
             nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
             nn.Conv2d(96, 48, kernel_size=3, padding=1),
@@ -465,16 +465,16 @@ class GGCNNDecoder(nn.Module):
             nn.ReLU(inplace=True)
         )
         
-        # 拼接 F1 后的卷积
-        # F1: [B, 48, 112, 112]，当前: [B, 48, 112, 112]，尺寸匹配
+        # Conv after concatenating F1
+        # F1: [B, 48, 112, 112], current: [B, 48, 112, 112], shapes align
         self.conv_skip1 = nn.Sequential(
             nn.Conv2d(48 + 48, 48, kernel_size=3, padding=1),
             nn.BatchNorm2d(48),
             nn.ReLU(inplace=True)
         )
         
-        # 最后的特征处理 + 上采样到接近全分辨率
-        # 112x112 → 224x224 (×2)
+        # Final feature processing + upsample toward full resolution
+        # 112x112 -> 224x224 (x2)
         self.upsample_final1 = nn.Sequential(
             nn.Conv2d(48, 32, kernel_size=3, padding=1),
             nn.BatchNorm2d(32),
@@ -488,7 +488,7 @@ class GGCNNDecoder(nn.Module):
             nn.ReLU(inplace=True)
         )
         
-        # GAAM/CF-GAAM 模块4：在最终输出之前（224x224 尺度，用于最终精化）
+        # GAAM/CF-GAAM #4: before heads (224x224), final refinement
         if use_cf_gaam:
             self.cf_gaam4 = CoarseToFineGAAM(
                 channels=32,
@@ -509,8 +509,8 @@ class GGCNNDecoder(nn.Module):
                 use_angle=True
             )
         
-        # 独立输出头（每个头都有独立的卷积层，参考 swin.py 和 parallel_model.py）
-        # Pos head: 位置/质量评估 [0, 1]
+        # Separate output heads (see swin.py / parallel_model.py)
+        # Pos head: quality / location in [0, 1]
         self.pos_output = nn.Sequential(
             nn.Conv2d(32, 32, kernel_size=3, padding=1),
             nn.BatchNorm2d(32),
@@ -519,7 +519,7 @@ class GGCNNDecoder(nn.Module):
             nn.Sigmoid()
         )
         
-        # Cos head: 角度余弦 [-1, 1]
+        # Cos head: angle cosine in [-1, 1]
         self.cos_output = nn.Sequential(
             nn.Conv2d(32, 32, kernel_size=3, padding=1),
             nn.BatchNorm2d(32),
@@ -527,7 +527,7 @@ class GGCNNDecoder(nn.Module):
             nn.Conv2d(32, 1, kernel_size=1, bias=False)
         )
         
-        # Sin head: 角度正弦 [-1, 1]
+        # Sin head: angle sine in [-1, 1]
         self.sin_output = nn.Sequential(
             nn.Conv2d(32, 32, kernel_size=3, padding=1),
             nn.BatchNorm2d(32),
@@ -535,7 +535,7 @@ class GGCNNDecoder(nn.Module):
             nn.Conv2d(32, 1, kernel_size=1, bias=False)
         )
         
-        # Width head: 宽度 [0, +∞)
+        # Width head: width in [0, +inf)
         self.width_output = nn.Sequential(
             nn.Conv2d(32, 32, kernel_size=3, padding=1),
             nn.BatchNorm2d(32),
@@ -547,106 +547,106 @@ class GGCNNDecoder(nn.Module):
     def forward(self, x: torch.Tensor, f1: torch.Tensor, f2: torch.Tensor, f3: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
         Args:
-            x: Swin 输出 [B, 768, 7, 7]
-            f1: CNN F1 特征 [B, 48, 112, 112]
-            f2: CNN F2 特征 [B, 96, 56, 56]
-            f3: CNN F3 特征 [B, 192, 28, 28]
+            x: Swin output [B, 768, 7, 7]
+            f1: CNN F1 [B, 48, 112, 112]
+            f2: CNN F2 [B, 96, 56, 56]
+            f3: CNN F3 [B, 192, 28, 28]
         
         Returns:
-            字典包含 'pos', 'cos', 'sin', 'width'
+            Dict with keys 'pos', 'cos', 'sin', 'width'
         """
-        # 降维: 768 → 256
+        # Reduce: 768 -> 256
         x = self.reduce_channels(x)  # [B, 256, 7, 7]
         
-        # GAAM/CF-GAAM 模块1：在解码器开始处
+        # GAAM/CF-GAAM #1: start of decoder
         if self.use_cf_gaam:
             x = self.cf_gaam1(x)  # [B, 256, 7, 7]
         elif self.use_gaam:
             x = self.gaam1(x)  # [B, 256, 7, 7]
         
-        # 上采样: 7x7 → 14x14
+        # Upsample: 7x7 -> 14x14
         x = self.upsample1(x)  # [B, 192, 14, 14]
         
-        # 上采样: 14x14 → 28x28
+        # Upsample: 14x14 -> 28x28
         x = self.upsample2(x)  # [B, 192, 28, 28]
         
-        # 拼接 F3 (确保尺寸匹配)
+        # Concat F3 (resize if needed)
         if x.shape[2:] != f3.shape[2:]:
             f3 = F.interpolate(f3, size=x.shape[2:], mode='bilinear', align_corners=True)
         x = torch.cat([x, f3], dim=1)  # [B, 384, 28, 28]
         x = self.conv_skip3(x)  # [B, 192, 28, 28]
         
-        # GAAM/CF-GAAM 模块2：在 F3 skip connection 之后
+        # GAAM/CF-GAAM #2: after F3 skip
         if self.use_cf_gaam:
             x = self.cf_gaam2(x)  # [B, 192, 28, 28]
         elif self.use_gaam:
             x = self.gaam2(x)  # [B, 192, 28, 28]
         
-        # 上采样: 28x28 → 56x56
+        # Upsample: 28x28 -> 56x56
         x = self.upsample3(x)  # [B, 96, 56, 56]
         
-        # 拼接 F2 (确保尺寸匹配)
+        # Concat F2 (resize if needed)
         if x.shape[2:] != f2.shape[2:]:
             f2 = F.interpolate(f2, size=x.shape[2:], mode='bilinear', align_corners=True)
         x = torch.cat([x, f2], dim=1)  # [B, 192, 56, 56]
         x = self.conv_skip2(x)  # [B, 96, 56, 56]
         
-        # GAAM/CF-GAAM 模块3：在 F2 skip connection 之后
+        # GAAM/CF-GAAM #3: after F2 skip
         if self.use_cf_gaam:
             x = self.cf_gaam3(x)  # [B, 96, 56, 56]
         elif self.use_gaam:
             x = self.gaam3(x)  # [B, 96, 56, 56]
         
-        # 上采样: 56x56 → 112x112
+        # Upsample: 56x56 -> 112x112
         x = self.upsample4(x)  # [B, 48, 112, 112]
         
-        # 拼接 F1 (确保尺寸匹配)
+        # Concat F1 (resize if needed)
         if x.shape[2:] != f1.shape[2:]:
             f1 = F.interpolate(f1, size=x.shape[2:], mode='bilinear', align_corners=True)
         x = torch.cat([x, f1], dim=1)  # [B, 96, 112, 112]
         x = self.conv_skip1(x)  # [B, 48, 112, 112]
         
-        # 最后的特征处理
+        # Final feature path
         x = self.upsample_final1(x)  # [B, 32, 112, 112]
         x = self.upsample_final2(x)  # [B, 32, 224, 224]
         
-        # GAAM/CF-GAAM 模块4：在最终输出之前（最终精化）
+        # GAAM/CF-GAAM #4: before output heads
         if self.use_cf_gaam:
             x = self.cf_gaam4(x)  # [B, 32, 224, 224]
         elif self.use_gaam:
             x = self.gaam4(x)  # [B, 32, 224, 224]
         
-        # 独立输出头（每个头独立处理共享特征）
-        pos_output = self.pos_output(x)    # [B, 1, 224, 224] (质量/位置)
-        cos_output = self.cos_output(x)    # [B, 1, 224, 224] (角度余弦)
-        sin_output = self.sin_output(x)    # [B, 1, 224, 224] (角度正弦)
-        width_output = self.width_output(x)  # [B, 1, 224, 224] (宽度)
+        # Output heads
+        pos_output = self.pos_output(x)    # [B, 1, 224, 224] quality / location
+        cos_output = self.cos_output(x)    # [B, 1, 224, 224] angle cosine
+        sin_output = self.sin_output(x)    # [B, 1, 224, 224] angle sine
+        width_output = self.width_output(x)  # [B, 1, 224, 224] width
         
         return {"pos": pos_output, "cos": cos_output, "sin": sin_output, "width": width_output}
 
 
 class HybridGraspNet(nn.Module):
     """
-    混合抓取网络 (Hybrid Grasp Network with Pretrained Swin Transformer)
-    
-    结构:
+    Hybrid Grasp Network (serial path; Swin may use ImageNet-pretrained weights when enabled).
+
+    Flow:
     Input RGB-D [B, 4, 224, 224]
-        ↓
-    CNN Backbone
-        ├─→ F1 [B, 48, 112, 112]  (skip connection 1)
-        ├─→ F2 [B, 96, 56, 56]    (输入到 Swin + skip 2)
-        └─→ F3 [B, 192, 28, 28]   (skip connection 3)
-        
+        |
+    CNN backbone
+        +-- F1 [B, 48, 112, 112]  (skip 1)
+        +-- F2 [B, 96, 56, 56]    (Swin input + skip 2)
+        +-- F3 [B, 192, 28, 28]   (skip 3)
+
     F2 [B, 96, 56, 56]
-        ↓ Channel Adapter (96 → 3)
+        | Channel adapter (96 -> 3)
     [B, 3, 56, 56]
-        ↓ Swin Transformer (ImageNet Pretrained)
+        | Swin Transformer (ImageNet pretrained if use_pretrained)
     [B, 768, 7, 7]
-        ↓ Decoder
-        ├─ Skip from F3 [192, 28, 28]
-        ├─ Skip from F2 [96, 56, 56]
-        └─ Skip from F1 [48, 112, 112]
-    Output: Pos(1), Cos(1), Sin(1), Width(1) [B, *, 224, 224]
+        | Decoder
+        + skip F3 [192, 28, 28]
+        + skip F2 [96, 56, 56]
+        + skip F1 [48, 112, 112]
+    Output: Pos(1), Cos(1), Sin(1), Width(1) at [B, *, 224, 224]
     """
     
     def __init__(self, in_chans: int = 4, input_channels: int = None, 
@@ -655,49 +655,47 @@ class HybridGraspNet(nn.Module):
                  use_cf_gaam: bool = False, num_peaks: int = 5):
         """
         Args:
-            in_chans: 输入通道数，默认4 (RGB-D)
-            input_channels: 兼容参数（与 in_chans 相同）
-            use_pretrained: 是否使用 ImageNet 预训练的 Swin
-            swin_size: Swin 模型大小 ('tiny', 'small', 'base')
-            use_uncertainty_loss: 是否使用不确定性加权损失（推荐开启）
-            use_gaam: 是否使用抓取感知注意力模块（GAAM）- 核心创新模块
-            use_cf_gaam: 是否使用粗到精GAAM模块（CF-GAAM）- 增强版，包含粗到精预测框架
-            num_peaks: CF-GAAM中检测的峰值数量
+            in_chans: Input channels, default 4 (RGB-D)
+            input_channels: Alias for in_chans
+            use_pretrained: Use ImageNet-pretrained Swin when supported
+            swin_size: Swin variant ('tiny', 'small', 'base')
+            use_uncertainty_loss: Use uncertainty-weighted loss (recommended)
+            use_gaam: Use grasp-aware attention (GAAM)
+            use_cf_gaam: Use coarse-to-fine GAAM (CF-GAAM), enhanced variant
+            num_peaks: Peak count for CF-GAAM
         """
         super(HybridGraspNet, self).__init__()
         
-        # 兼容性处理
         if input_channels is not None:
             in_chans = input_channels
         
-        print(f"[Model] 初始化 HybridGraspNet (串行版本)")
-        print(f"  - 输入通道: {in_chans} (RGB-D)")
-        print(f"  - Swin 模型: {swin_size}")
-        print(f"  - 使用预训练: {use_pretrained}")
-        print(f"  - 不确定性损失: {'开启' if use_uncertainty_loss else '关闭'}")
+        print(f"[Model] Initializing HybridGraspNet (serial)")
+        print(f"  - input channels: {in_chans} (RGB-D)")
+        print(f"  - Swin size: {swin_size}")
+        print(f"  - pretrained: {use_pretrained}")
+        print(f"  - uncertainty loss: {'on' if use_uncertainty_loss else 'off'}")
         if use_cf_gaam:
-            print(f"  - 粗到精抓取感知注意力 (CF-GAAM): 开启 ⭐⭐ 增强版创新模块")
-            print(f"    - 峰值数量: {num_peaks}")
+            print(f"  - coarse-to-fine GAAM (CF-GAAM): on [enhanced]")
+            print(f"    - num_peaks: {num_peaks}")
         else:
-            print(f"  - 抓取感知注意力 (GAAM): {'开启' if use_gaam else '关闭'} ⭐ 核心创新模块")
+            print(f"  - grasp-aware attention (GAAM): {'on' if use_gaam else 'off'} [core module]")
         
-        # CNN Backbone：提取多尺度特征
+        # CNN backbone: multi-scale features
         self.backbone = CNNBackbone(in_chans=in_chans)
         
-        # 通道适配：96 → 3 (F2 通道数 → Swin 输入通道数)
+        # Channel adapter: 96 -> 3 (F2 -> Swin RGB)
         self.channel_adapter = ChannelAdapter(in_channels=96, out_channels=3)
         
-        # Swin Transformer (预训练)
+        # Swin Transformer
         self.swin = SwinTransformerBlock(
-            img_size=56,  # F2 的空间尺寸
+            img_size=56,  # F2 spatial size
             pretrained=use_pretrained,
             model_size=swin_size
         )
         
-        # Swin 输出通道数
         swin_out_ch = self.swin.out_channels
         
-        # Decoder（集成 GAAM 或 CF-GAAM）
+        # Decoder with GAAM or CF-GAAM
         self.decoder = GGCNNDecoder(
             swin_channels=swin_out_ch, 
             use_gaam=use_gaam,
@@ -705,117 +703,105 @@ class HybridGraspNet(nn.Module):
             num_peaks=num_peaks
         )
         
-        # 不确定性加权损失模块
         self.use_uncertainty_loss = use_uncertainty_loss
         if use_uncertainty_loss:
             self.uncertainty_loss = UncertaintyWeightedLoss(num_tasks=4)
-            print(f"  - 损失自动加权: 启用（模型将学习最优权重）")
+            print(f"  - loss auto-weighting: enabled (model learns task weights)")
         
-        print(f"[Model] 初始化完成！")
+        print(f"[Model] Initialization done.")
     
     def forward(self, x: torch.Tensor, verbose: bool = False) -> Dict[str, torch.Tensor]:
         """
-        前向传播
-        
+        Forward pass.
+
         Args:
-            x: 输入图像 [B, 4, 224, 224]
-            verbose: 是否打印中间张量尺寸
-        
+            x: Input image [B, 4, 224, 224]
+            verbose: Print intermediate tensor shapes
+
         Returns:
-            字典包含:
-                - 'pos': 位置/质量图 [B, 1, 224, 224]
-                - 'cos': 角度余弦图 [B, 1, 224, 224]
-                - 'sin': 角度正弦图 [B, 1, 224, 224]
-                - 'width': 宽度图 [B, 1, 224, 224]
+            Dict with:
+                - 'pos': quality map [B, 1, 224, 224]
+                - 'cos': angle cosine map [B, 1, 224, 224]
+                - 'sin': angle sine map [B, 1, 224, 224]
+                - 'width': width map [B, 1, 224, 224]
         """
         if verbose:
-            print(f"输入: {x.shape}")
+            print(f"input: {x.shape}")
         
-        # Step 1: CNN Backbone 提取多尺度特征
+        # Step 1: CNN backbone
         f1, f2, f3 = self.backbone(x)
         if verbose:
             print(f"CNN F1: {f1.shape}")  # [B, 48, 112, 112]
             print(f"CNN F2: {f2.shape}")  # [B, 96, 56, 56]
-            print(f"CNN F3: {f3.shape}")  # [B, 192, 28, 28] (不使用)
+            print(f"CNN F3: {f3.shape}")  # [B, 192, 28, 28]
         
-        # Step 2: F2 通道适配 (96 → 3)
+        # Step 2: adapt F2 (96 -> 3)
         f2_adapted = self.channel_adapter(f2)  # [B, 3, 56, 56]
         if verbose:
-            print(f"F2 适配后: {f2_adapted.shape}")
+            print(f"F2 after adapter: {f2_adapted.shape}")
         
-        # Step 3: Swin Transformer (预训练)
+        # Step 3: Swin
         swin_out = self.swin(f2_adapted)  # [B, 768, 7, 7]
         if verbose:
-            print(f"Swin 输出: {swin_out.shape}")
+            print(f"Swin out: {swin_out.shape}")
         
-        # Step 4: Decoder (with F3, F2, F1 skip connections)
+        # Step 4: decoder with F3, F2, F1 skips
         outputs = self.decoder(swin_out, f1, f2, f3)
         if verbose:
-            print(f"最终输出:")
-            print(f"  Pos (质量): {outputs['pos'].shape}")
-            print(f"  Cos (角度余弦): {outputs['cos'].shape}")
-            print(f"  Sin (角度正弦): {outputs['sin'].shape}")
-            print(f"  Width (宽度): {outputs['width'].shape}")
+            print(f"outputs:")
+            print(f"  Pos (quality): {outputs['pos'].shape}")
+            print(f"  Cos (angle cosine): {outputs['cos'].shape}")
+            print(f"  Sin (angle sine): {outputs['sin'].shape}")
+            print(f"  Width: {outputs['width'].shape}")
         
         return outputs
     
     def compute_loss(self, xc: torch.Tensor, yc: list, 
                      loss_weights: Dict[str, float] = None) -> Dict[str, any]:
         """
-        计算损失函数（兼容 GGCNN 训练框架）
-        
+        Compute loss (compatible with GGCNN training).
+
         Args:
-            xc: 输入图像 [B, C, H, W]
-            yc: 标签列表 [pos_img, cos_img, sin_img, width_img]
-            loss_weights: 损失权重字典 {'p': 1.5, 'cos': 1.0, 'sin': 1.0, 'width': 0.8}
-        
+            xc: Input image [B, C, H, W]
+            yc: Targets [pos_img, cos_img, sin_img, width_img]
+            loss_weights: Manual weights {'p': 1.5, 'cos': 1.0, 'sin': 1.0, 'width': 0.8}
+
         Returns:
-            字典包含:
-                - 'loss': 总损失
-                - 'losses': 各分项损失字典
-                - 'pred': 预测输出字典
+            Dict with 'loss', 'losses', 'pred'
         """
-        # 默认权重：质量最重要 > 角度 > 宽度
         if loss_weights is None:
             loss_weights = {
-                'p': 1.5,      # 质量损失权重（最关键）
-                'cos': 1.0,    # cos 角度损失
-                'sin': 1.0,    # sin 角度损失
-                'width': 0.8   # 宽度损失（相对次要）
+                'p': 1.5,      # quality (primary)
+                'cos': 1.0,
+                'sin': 1.0,
+                'width': 0.8
             }
         
-        # 前向传播
         outputs = self.forward(xc)
         
-        # 提取预测（已经是独立输出头）
-        pos_pred = outputs['pos']       # [B, 1, H', W']
-        cos_pred = outputs['cos']       # [B, 1, H', W']
-        sin_pred = outputs['sin']       # [B, 1, H', W']
-        width_pred = outputs['width']   # [B, 1, H', W']
+        pos_pred = outputs['pos']
+        cos_pred = outputs['cos']
+        sin_pred = outputs['sin']
+        width_pred = outputs['width']
         
-        # 标签
         pos_gt, cos_gt, sin_gt, width_gt = yc
         
-        # 确保尺寸匹配：将预测上采样到标签尺寸（保持标签的稀疏性）
         if pos_pred.shape[2:] != pos_gt.shape[2:]:
             pos_pred = F.interpolate(pos_pred, size=pos_gt.shape[2:], mode='bilinear', align_corners=True)
             sin_pred = F.interpolate(sin_pred, size=pos_gt.shape[2:], mode='bilinear', align_corners=True)
             cos_pred = F.interpolate(cos_pred, size=pos_gt.shape[2:], mode='bilinear', align_corners=True)
             width_pred = F.interpolate(width_pred, size=pos_gt.shape[2:], mode='bilinear', align_corners=True)
         
-        # 计算各项原始损失（不加权）
         p_loss_raw = F.mse_loss(pos_pred, pos_gt)
         cos_loss_raw = F.mse_loss(cos_pred, cos_gt)
         sin_loss_raw = F.mse_loss(sin_pred, sin_gt)
         width_loss_raw = F.mse_loss(width_pred, width_gt)
         
-        # 根据模式计算总损失
         if self.use_uncertainty_loss:
-            # 🔥 不确定性加权（自动学习权重）
+            # Uncertainty weighting (learned task weights)
             losses_list = [p_loss_raw, cos_loss_raw, sin_loss_raw, width_loss_raw]
             total_loss = self.uncertainty_loss(losses_list)
             
-            # 获取学到的权重
             learned_weights = self.uncertainty_loss.get_weights()
             learned_sigmas = self.uncertainty_loss.get_uncertainties()
             
@@ -825,14 +811,12 @@ class HybridGraspNet(nn.Module):
             width_loss = width_loss_raw * learned_weights[3]
             
         else:
-            # 手动加权（传统方法）
             p_loss = p_loss_raw * loss_weights['p']
             cos_loss = cos_loss_raw * loss_weights['cos']
             sin_loss = sin_loss_raw * loss_weights['sin']
             width_loss = width_loss_raw * loss_weights['width']
             total_loss = p_loss + cos_loss + sin_loss + width_loss
         
-        # 构建返回字典
         loss_dict = {
             'p_loss': p_loss,
             'cos_loss': cos_loss,
@@ -840,7 +824,6 @@ class HybridGraspNet(nn.Module):
             'width_loss': width_loss
         }
         
-        # 如果使用不确定性损失，添加学到的权重
         if self.use_uncertainty_loss:
             loss_dict.update({
                 'learned_weight_p': learned_weights[0],
@@ -853,7 +836,6 @@ class HybridGraspNet(nn.Module):
                 'uncertainty_width': learned_sigmas[3],
             })
         
-        # 返回结果（兼容训练框架）
         return {
             'loss': total_loss,
             'losses': loss_dict,

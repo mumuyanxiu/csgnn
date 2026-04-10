@@ -40,20 +40,17 @@ def parse_args():
                         help='Shift the start point of the dataset to use a different test/train split for cross validation.')
     parser.add_argument('--num-workers', type=int, default=8, help='Dataset workers')
 
-    parser.add_argument('--batch-size', type=int, default=8, help='Batch size')
+    parser.add_argument('--batch-size', type=int, default=32, help='Batch size')
     parser.add_argument('--epochs', type=int, default=50, help='Training epochs')
     parser.add_argument('--batches-per-epoch', type=int, default=1000, help='Batches per Epoch')
     parser.add_argument('--val-batches', type=int, default=250, help='Validation Batches')
 
     # Model-specific parameters (for Parallel model)
-    parser.add_argument('--fusion-type', type=str, default='simple',
-                        choices=['simple', 'attention', 'cross_attention'],
-                        help='Fusion type for parallel model (simple/attention/cross_attention)')
     parser.add_argument('--num-heads', type=int, default=8,
-                        help='Number of attention heads for cross_attention fusion')
+                        help='Number of attention heads for Cross-Attention fusion')
     parser.add_argument('--swin-size', type=str, default='tiny',
                         choices=['tiny', 'small', 'base'],
-                        help='Swin Transformer model size')
+                        help='Swin Transformer model size (仅用于 serial/hybrid 模型，parallel 模型使用固定配置)')
     
     # GAAM parameters
     parser.add_argument('--use-gaam', action='store_true',
@@ -167,7 +164,21 @@ def train(epoch, net, device, train_data, optimizer, batches_per_epoch, vis=Fals
             loss = lossd['loss']
 
             if batch_idx % 100 == 0:
-                logging.info('Epoch: {}, Batch: {}, Loss: {:0.4f}'.format(epoch, batch_idx, loss.item()))
+                # 显示更详细的损失信息
+                loss_val = loss.item()
+                if loss_val < 1e-4:
+                    logging.info('Epoch: {}, Batch: {}, Loss: {:.6e}'.format(epoch, batch_idx, loss_val))
+                else:
+                    logging.info('Epoch: {}, Batch: {}, Loss: {:0.4f}'.format(epoch, batch_idx, loss_val))
+                
+                # 显示各项原始损失（如果可用）
+                if 'losses' in lossd and len(lossd['losses']) > 0:
+                    loss_items = []
+                    for k, v in lossd['losses'].items():
+                        if 'loss' in k.lower() and not 'learned' in k.lower() and not 'uncertainty' in k.lower():
+                            loss_items.append(f"{k}: {v.item():.4f}")
+                    if loss_items:
+                        logging.info('  -> ' + ', '.join(loss_items))
 
             results['loss'] += loss.item()
             for ln, l in lossd['losses'].items():
@@ -225,7 +236,10 @@ def run():
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=args.num_workers
+        num_workers=args.num_workers,
+        pin_memory=True,  # 加速CPU到GPU的数据传输
+        persistent_workers=True if args.num_workers > 0 else False,  # 保持worker进程，减少重启开销
+        prefetch_factor=2 if args.num_workers > 0 else 2  # 预取数据，减少等待时间
     )
     val_dataset = Dataset(args.dataset_path, start=args.split, end=1.0, ds_rotate=args.ds_rotate,
                           random_rotate=True, random_zoom=True,
@@ -234,7 +248,9 @@ def run():
         val_dataset,
         batch_size=1,
         shuffle=False,
-        num_workers=args.num_workers
+        num_workers=args.num_workers,
+        pin_memory=True,
+        persistent_workers=True if args.num_workers > 0 else False
     )
     logging.info('Done')
 
@@ -245,21 +261,19 @@ def run():
 
     # 根据网络类型传递参数
     if args.network == 'parallel':
-        # Parallel 模型支持 fusion_type, num_heads, swin_size, GAAM/CF-GAAM
+        # Parallel 模型支持 num_heads, GAAM/CF-GAAM (使用 Cross-Attention 融合，Swin 使用固定配置)
         net = ggcnn(
             input_channels=input_channels,
-            fusion_type=args.fusion_type,
             num_heads=args.num_heads,
-            swin_size=args.swin_size,
             use_pretrained=True,
             use_gaam=args.use_gaam,
             use_cf_gaam=args.use_cf_gaam,
             num_peaks=args.num_peaks
         )
         logging.info(f'Parallel Model Config:')
-        logging.info(f'  - Fusion Type: {args.fusion_type}')
+        logging.info(f'  - Fusion Type: Cross-Attention (双向查询)')
         logging.info(f'  - Num Heads: {args.num_heads}')
-        logging.info(f'  - Swin Size: {args.swin_size}')
+        logging.info(f'  - Swin Branch: 固定配置 (custom-fixed)')
         if args.use_cf_gaam:
             logging.info(f'  - CF-GAAM: Enabled (num_peaks={args.num_peaks})')
         elif args.use_gaam:
@@ -312,9 +326,9 @@ def run():
     # 保存模型特定配置
     if args.network == 'parallel':
         f.write(f'\n[Parallel Model Config]\n')
-        f.write(f'Fusion Type: {args.fusion_type}\n')
+        f.write(f'Fusion Type: Cross-Attention (双向查询)\n')
         f.write(f'Num Heads: {args.num_heads}\n')
-        f.write(f'Swin Size: {args.swin_size}\n')
+        f.write(f'Swin Branch: 固定配置 (custom-fixed)\n')
         if args.use_cf_gaam:
             f.write(f'CF-GAAM: Enabled (num_peaks={args.num_peaks})\n')
         elif args.use_gaam:

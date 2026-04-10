@@ -7,3 +7,11 @@ output
 *.pyc
 
 /.python-version
+
+# SSH Keys (安全：不要提交私钥到仓库)
+ghp_*
+*.pem
+*.key
+id_rsa
+id_ed25519
+*.pub
